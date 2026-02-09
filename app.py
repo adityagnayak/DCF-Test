@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from pydantic import ValidationError
 
 # Import the custom engine
@@ -14,17 +13,57 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- 4. Font Customization (Roboto) ---
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
+    
+    html, body, [class*="css"]  {
+        font-family: 'Roboto', sans-serif;
+    }
+    
+    .metric-card {
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .metric-label { font-size: 14px; color: #555; }
+    .metric-value { font-size: 24px; font-weight: bold; }
+    </style>
+""", unsafe_allow_html=True)
+
 # Initialize Engine
 engine = ValuationEngine()
 
+# --- Helper Functions ---
+
+# 3. Dynamic Coloring Helper
+def get_color_style(value):
+    """Returns CSS color string based on value sign."""
+    if value > 0:
+        return "color: #28a745; border-left: 5px solid #28a745;" # Green
+    elif value < 0:
+        return "color: #dc3545; border-left: 5px solid #dc3545;" # Red
+    else:
+        return "color: #007bff; border-left: 5px solid #007bff;" # Blue (Breakeven)
+
+# 1. Synced Input Helper (Callbacks)
+if 'wacc' not in st.session_state: st.session_state.wacc = 0.085
+if 'tax' not in st.session_state: st.session_state.tax = 0.21
+
+def update_wacc_slider(): st.session_state.wacc = st.session_state.wacc_slider
+def update_wacc_input(): st.session_state.wacc = st.session_state.wacc_input
+def update_tax_slider(): st.session_state.tax = st.session_state.tax_slider
+def update_tax_input(): st.session_state.tax = st.session_state.tax_input
+
 # --- Caching ---
-@st.cache_data(ttl=3600) # Cache FX calls for 1 hour
+@st.cache_data(ttl=3600)
 def get_cached_fx(base, quote):
     return engine.get_real_time_fx(base, quote)
 
 @st.cache_data
 def run_simulation(input_model_dict, manual_fx):
-    # Reconstruct Pydantic model inside cache (Streamlit hashes arguments)
     model = DCFInput(**input_model_dict)
     return engine.calculate_metrics(model, manual_fx_rate=manual_fx)
 
@@ -32,21 +71,6 @@ def run_simulation(input_model_dict, manual_fx):
 def run_sensitivity(input_model_dict, current_fx):
     model = DCFInput(**input_model_dict)
     return engine.sensitivity_analysis(model, current_fx)
-
-# --- UI Styling ---
-st.markdown("""
-    <style>
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #ff4b4b;
-        text-align: center;
-    }
-    .metric-label { font-size: 14px; color: #555; }
-    .metric-value { font-size: 24px; font-weight: bold; color: #0f1116; }
-    </style>
-""", unsafe_allow_html=True)
 
 # --- Sidebar: Inputs ---
 st.sidebar.header("1. Global Parameters")
@@ -56,29 +80,64 @@ project_ccy = st.sidebar.selectbox("Project Currency (Local)", ["EUR", "USD", "G
 
 st.sidebar.header("2. Financial Assumptions")
 initial_inv = st.sidebar.number_input("Initial Investment (Local Ccy)", min_value=1000.0, value=1000000.0, step=10000.0)
-wacc_input = st.sidebar.slider("WACC (Cost of Capital %)", 1.0, 20.0, 8.5) / 100
-tax_input = st.sidebar.slider("Corporate Tax Rate (%)", 0.0, 40.0, 21.0) / 100
 
+# Synced WACC Input
+st.sidebar.subheader("Cost of Capital (WACC)")
+col_w1, col_w2 = st.sidebar.columns([1, 2])
+with col_w1:
+    st.number_input("WACC", 0.0, 0.5, key="wacc_input", on_change=update_wacc_input, format="%.3f", label_visibility="collapsed")
+with col_w2:
+    st.slider("", 0.0, 0.20, key="wacc_slider", on_change=update_wacc_slider, format="%.3f", label_visibility="collapsed")
+
+# Synced Tax Input
+st.sidebar.subheader("Tax Rate")
+col_t1, col_t2 = st.sidebar.columns([1, 2])
+with col_t1:
+    st.number_input("Tax", 0.0, 0.5, key="tax_input", on_change=update_tax_input, format="%.3f", label_visibility="collapsed")
+with col_t2:
+    st.slider("", 0.0, 0.50, key="tax_slider", on_change=update_tax_slider, format="%.3f", label_visibility="collapsed")
+
+# --- 2. Cash Flow Projection Method ---
 st.sidebar.header("3. Projections")
-proj_years = st.sidebar.slider("Projection Years", 3, 10, 5)
-base_cf = st.sidebar.number_input("Year 1 Operating Cash Flow (Local Ccy)", value=250000.0)
-growth_rate = st.sidebar.slider("Annual Growth Rate (%)", -10.0, 50.0, 5.0) / 100
+proj_years = st.sidebar.number_input("Projection Years", 3, 15, 5)
 
-# Generate Cash Flows based on simple growth for the demo
-cash_flows = [base_cf * ((1 + growth_rate) ** i) for i in range(proj_years)]
+method = st.sidebar.radio("Projection Method", ["Growth Rate (Auto)", "Manual Entry"])
+
+cash_flows = []
+if method == "Growth Rate (Auto)":
+    base_cf = st.sidebar.number_input("Year 1 Operating Cash Flow", value=250000.0)
+    growth_rate = st.sidebar.slider("Annual Growth Rate (%)", -10.0, 50.0, 5.0) / 100
+    cash_flows = [base_cf * ((1 + growth_rate) ** i) for i in range(proj_years)]
+else:
+    st.sidebar.info("Enter Cash Flows in the Main Dashboard")
+    # Initialize default data for the editor
+    default_data = pd.DataFrame({
+        "Year": range(1, proj_years + 1),
+        "Operating Cash Flow": [250000.0] * proj_years
+    })
 
 # --- Main Dashboard ---
 st.title(f"📊 DCF Valuation: {project_name}")
 
+# Handle Manual Entry in Main Area (Better UX than sidebar)
+if method == "Manual Entry":
+    st.subheader("📝 Manual Cash Flow Entry")
+    edited_df = st.data_editor(
+        default_data, 
+        column_config={"Operating Cash Flow": st.column_config.NumberColumn(format="%.2f")},
+        hide_index=True,
+        use_container_width=True
+    )
+    cash_flows = edited_df["Operating Cash Flow"].tolist()
+
 # 1. Validation & Data Prep
 try:
-    # Build Pydantic Model
     dcf_input = DCFInput(
         project_name=project_name,
         initial_investment=initial_inv,
         cash_flows=cash_flows,
-        wacc=wacc_input,
-        tax_rate=tax_input,
+        wacc=st.session_state.wacc, # Use session state value
+        tax_rate=st.session_state.tax, # Use session state value
         reporting_currency=reporting_ccy,
         project_currency=project_ccy
     )
@@ -86,7 +145,7 @@ try:
     # 2. Fetch Live Data
     live_fx = get_cached_fx(project_ccy, reporting_ccy)
     
-    # Allow manual FX override
+    # Allow manual FX override (Finding 0: Keep this!)
     use_manual_fx = st.checkbox(f"Override Live FX Rate ({live_fx:.4f})")
     if use_manual_fx:
         active_fx = st.number_input("Manual FX Rate", value=live_fx, format="%.4f")
@@ -94,7 +153,6 @@ try:
         active_fx = live_fx
 
     # 3. Calculation Engine
-    # Pass dict to cache function to avoid pickling issues with Pydantic in some envs
     results = run_simulation(dcf_input.model_dump(), active_fx)
     
     npv = results['npv']
@@ -103,12 +161,16 @@ try:
 
     # --- Results Display ---
     
-    # Top KPI Row
+    # Dynamic Colors
+    npv_style = get_color_style(npv)
+    irr_val = irr if irr else 0 # Handle None for styling
+    irr_style = get_color_style(irr_val)
+
     c1, c2, c3, c4 = st.columns(4)
     
     with c1:
         st.markdown(f"""
-        <div class="metric-card">
+        <div class="metric-card" style="background-color: #f8f9fa; {npv_style}">
             <div class="metric-label">Net Present Value ({reporting_ccy})</div>
             <div class="metric-value">{npv:,.0f}</div>
         </div>
@@ -117,17 +179,27 @@ try:
     with c2:
         irr_display = f"{irr:.2%}" if irr else "N/A"
         st.markdown(f"""
-        <div class="metric-card" style="border-left: 5px solid #28a745;">
+        <div class="metric-card" style="background-color: #f8f9fa; {irr_style}">
             <div class="metric-label">Internal Rate of Return (IRR)</div>
             <div class="metric-value">{irr_display}</div>
         </div>
         """, unsafe_allow_html=True)
 
     with c3:
-        st.metric("FX Rate Used", f"{active_fx:.4f}", help=f"1 {project_ccy} = {active_fx:.4f} {reporting_ccy}")
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #f8f9fa; border-left: 5px solid #6c757d;">
+            <div class="metric-label">FX Rate Used</div>
+            <div class="metric-value">{active_fx:.4f}</div>
+        </div>
+        """, unsafe_allow_html=True)
         
     with c4:
-        st.metric("WACC / Tax", f"{wacc_input:.1%} / {tax_input:.1%}")
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #f8f9fa; border-left: 5px solid #6c757d;">
+            <div class="metric-label">WACC / Tax</div>
+            <div class="metric-value">{st.session_state.wacc:.1%} / {st.session_state.tax:.1%}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.divider()
 
@@ -136,8 +208,6 @@ try:
 
     with col_left:
         st.subheader("Cash Flow Trajectory")
-        
-        # Plotly Bar Chart: Annual Cash Flows
         fig_cf = px.bar(
             df_details, 
             x='Year', 
@@ -146,12 +216,12 @@ try:
             labels={'value': 'Amount', 'variable': 'Cash Flow Type'},
             title="Pre-Tax (Local) vs Post-Tax (Reporting) Cash Flows"
         )
-        fig_cf.update_layout(xaxis_title="Year", yaxis_title=f"Currency Amount")
+        # Update chart font to Roboto to match UI
+        fig_cf.update_layout(font=dict(family="Roboto"))
         st.plotly_chart(fig_cf, use_container_width=True)
 
     with col_right:
         st.subheader("Financial Schedule")
-        # Formatting for display
         display_df = df_details[['Year', 'Op_CF_Project_Ccy', 'Post_Tax_CF_Reporting_Ccy', 'PV_Reporting_Ccy']].copy()
         display_df.columns = ['Year', f'Op CF ({project_ccy})', f'Post-Tax ({reporting_ccy})', f'PV ({reporting_ccy})']
         st.dataframe(display_df.style.format("{:,.0f}"), use_container_width=True, hide_index=True)
@@ -159,12 +229,9 @@ try:
     # --- Sensitivity Analysis Section ---
     st.divider()
     st.subheader("🌍 FX Sensitivity Analysis")
-    st.markdown("Impact of exchange rate volatility on Project NPV (±45% Movement).")
-
-    # Run sensitivity
+    
     sens_df = run_sensitivity(dcf_input.model_dump(), active_fx)
 
-    # Visualization
     fig_sens = px.area(
         sens_df, 
         x="FX_Movement_Pct", 
@@ -173,11 +240,13 @@ try:
         title=f"NPV Sensitivity to {project_ccy}/{reporting_ccy} Rate"
     )
     
-    # Add a vertical line for current state
-    fig_sens.add_vline(x=0, line_dash="dash", line_color="red", annotation_text="Current Rate")
+    fig_sens.add_vline(x=0, line_dash="dash", line_color="black", annotation_text="Current Rate")
     
-    # Dynamic coloring based on NPV > 0
-    fig_sens.update_traces(line_color='#1f77b4', fill='tozeroy')
+    # Conditional coloring for sensitivity chart is complex in simple Plotly, 
+    # but we can set the main fill color to neutral blue
+    fig_sens.update_traces(line_color='#007bff', fill='tozeroy')
+    fig_sens.update_layout(font=dict(family="Roboto"))
+    
     st.plotly_chart(fig_sens, use_container_width=True)
 
 except ValidationError as e:
