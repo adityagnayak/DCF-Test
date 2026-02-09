@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 4. Font Customization (Roboto) ---
+# --- Font Customization (Roboto) ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
@@ -27,9 +27,10 @@ st.markdown("""
         border-radius: 10px;
         text-align: center;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        margin-bottom: 10px;
     }
     .metric-label { font-size: 14px; color: #555; }
-    .metric-value { font-size: 24px; font-weight: bold; }
+    .metric-value { font-size: 24px; font-weight: bold; color: #000; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -38,7 +39,6 @@ engine = ValuationEngine()
 
 # --- Helper Functions ---
 
-# 3. Dynamic Coloring Helper
 def get_color_style(value):
     """Returns CSS color string based on value sign."""
     if value > 0:
@@ -48,14 +48,21 @@ def get_color_style(value):
     else:
         return "color: #007bff; border-left: 5px solid #007bff;" # Blue (Breakeven)
 
-# 1. Synced Input Helper (Callbacks)
+# --- Bi-Directional Sync Callbacks ---
+# These functions ensure that when one widget moves, the other updates to match.
+
 if 'wacc' not in st.session_state: st.session_state.wacc = 0.085
 if 'tax' not in st.session_state: st.session_state.tax = 0.21
 
-def update_wacc_slider(): st.session_state.wacc = st.session_state.wacc_slider
-def update_wacc_input(): st.session_state.wacc = st.session_state.wacc_input
-def update_tax_slider(): st.session_state.tax = st.session_state.tax_slider
-def update_tax_input(): st.session_state.tax = st.session_state.tax_input
+def update_wacc_from_slider():
+    st.session_state.wacc = st.session_state.wacc_slider
+def update_wacc_from_input():
+    st.session_state.wacc = st.session_state.wacc_input
+    
+def update_tax_from_slider():
+    st.session_state.tax = st.session_state.tax_slider
+def update_tax_from_input():
+    st.session_state.tax = st.session_state.tax_input
 
 # --- Caching ---
 @st.cache_data(ttl=3600)
@@ -85,17 +92,19 @@ initial_inv = st.sidebar.number_input("Initial Investment (Local Ccy)", min_valu
 st.sidebar.subheader("Cost of Capital (WACC)")
 col_w1, col_w2 = st.sidebar.columns([1, 2])
 with col_w1:
-    st.number_input("WACC", 0.0, 0.5, key="wacc_input", on_change=update_wacc_input, format="%.3f", label_visibility="collapsed")
+    # Text Input linked to main 'wacc' state
+    st.number_input("WACC", 0.0, 0.5, key="wacc_input", on_change=update_wacc_from_input, format="%.3f", label_visibility="collapsed", value=st.session_state.wacc)
 with col_w2:
-    st.slider("", 0.0, 0.20, key="wacc_slider", on_change=update_wacc_slider, format="%.3f", label_visibility="collapsed")
+    # Slider linked to main 'wacc' state
+    st.slider("", 0.0, 0.20, key="wacc_slider", on_change=update_wacc_from_slider, format="%.3f", label_visibility="collapsed", value=st.session_state.wacc)
 
 # Synced Tax Input
 st.sidebar.subheader("Tax Rate")
 col_t1, col_t2 = st.sidebar.columns([1, 2])
 with col_t1:
-    st.number_input("Tax", 0.0, 0.5, key="tax_input", on_change=update_tax_input, format="%.3f", label_visibility="collapsed")
+    st.number_input("Tax", 0.0, 0.5, key="tax_input", on_change=update_tax_from_input, format="%.3f", label_visibility="collapsed", value=st.session_state.tax)
 with col_t2:
-    st.slider("", 0.0, 0.50, key="tax_slider", on_change=update_tax_slider, format="%.3f", label_visibility="collapsed")
+    st.slider("", 0.0, 0.50, key="tax_slider", on_change=update_tax_from_slider, format="%.3f", label_visibility="collapsed", value=st.session_state.tax)
 
 # --- 2. Cash Flow Projection Method ---
 st.sidebar.header("3. Projections")
@@ -119,14 +128,22 @@ else:
 # --- Main Dashboard ---
 st.title(f"📊 DCF Valuation: {project_name}")
 
-# Handle Manual Entry in Main Area (Better UX than sidebar)
+# Handle Manual Entry in Main Area
 if method == "Manual Entry":
     st.subheader("📝 Manual Cash Flow Entry")
+    st.caption("Please edit the 'Operating Cash Flow' column below. The 'Year' column is fixed.")
+    
+    # QoL Change: Disable "Year" column to prevent confusion
     edited_df = st.data_editor(
         default_data, 
-        column_config={"Operating Cash Flow": st.column_config.NumberColumn(format="%.2f")},
+        column_config={
+            "Operating Cash Flow": st.column_config.NumberColumn(format="%.2f", required=True),
+            "Year": st.column_config.NumberColumn(disabled=True) # Makes this column read-only
+        },
+        disabled=["Year"], # Extra layer of safety
         hide_index=True,
-        use_container_width=True
+        use_container_width=True,
+        num_rows="fixed" # Prevents adding/deleting rows
     )
     cash_flows = edited_df["Operating Cash Flow"].tolist()
 
@@ -136,8 +153,8 @@ try:
         project_name=project_name,
         initial_investment=initial_inv,
         cash_flows=cash_flows,
-        wacc=st.session_state.wacc, # Use session state value
-        tax_rate=st.session_state.tax, # Use session state value
+        wacc=st.session_state.wacc, 
+        tax_rate=st.session_state.tax, 
         reporting_currency=reporting_ccy,
         project_currency=project_ccy
     )
@@ -145,8 +162,9 @@ try:
     # 2. Fetch Live Data
     live_fx = get_cached_fx(project_ccy, reporting_ccy)
     
-    # Allow manual FX override (Finding 0: Keep this!)
+    # Allow manual FX override
     use_manual_fx = st.checkbox(f"Override Live FX Rate ({live_fx:.4f})")
+    
     if use_manual_fx:
         active_fx = st.number_input("Manual FX Rate", value=live_fx, format="%.4f")
     else:
@@ -161,10 +179,15 @@ try:
 
     # --- Results Display ---
     
-    # Dynamic Colors
+    # Prepare styles and strings explicitly BEFORE the HTML block
     npv_style = get_color_style(npv)
-    irr_val = irr if irr else 0 # Handle None for styling
+    irr_val = irr if irr else 0 
     irr_style = get_color_style(irr_val)
+    irr_display = f"{irr:.2%}" if irr else "N/A"
+    
+    # Robust Formatting for FX and Rates
+    fx_display_str = f"{active_fx:.4f}"
+    rates_display_str = f"{st.session_state.wacc:.1%} / {st.session_state.tax:.1%}"
 
     c1, c2, c3, c4 = st.columns(4)
     
@@ -177,7 +200,6 @@ try:
         """, unsafe_allow_html=True)
         
     with c2:
-        irr_display = f"{irr:.2%}" if irr else "N/A"
         st.markdown(f"""
         <div class="metric-card" style="background-color: #f8f9fa; {irr_style}">
             <div class="metric-label">Internal Rate of Return (IRR)</div>
@@ -189,7 +211,7 @@ try:
         st.markdown(f"""
         <div class="metric-card" style="background-color: #f8f9fa; border-left: 5px solid #6c757d;">
             <div class="metric-label">FX Rate Used</div>
-            <div class="metric-value">{active_fx:.4f}</div>
+            <div class="metric-value">{fx_display_str}</div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -197,7 +219,7 @@ try:
         st.markdown(f"""
         <div class="metric-card" style="background-color: #f8f9fa; border-left: 5px solid #6c757d;">
             <div class="metric-label">WACC / Tax</div>
-            <div class="metric-value">{st.session_state.wacc:.1%} / {st.session_state.tax:.1%}</div>
+            <div class="metric-value">{rates_display_str}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -216,7 +238,6 @@ try:
             labels={'value': 'Amount', 'variable': 'Cash Flow Type'},
             title="Pre-Tax (Local) vs Post-Tax (Reporting) Cash Flows"
         )
-        # Update chart font to Roboto to match UI
         fig_cf.update_layout(font=dict(family="Roboto"))
         st.plotly_chart(fig_cf, use_container_width=True)
 
@@ -241,9 +262,6 @@ try:
     )
     
     fig_sens.add_vline(x=0, line_dash="dash", line_color="black", annotation_text="Current Rate")
-    
-    # Conditional coloring for sensitivity chart is complex in simple Plotly, 
-    # but we can set the main fill color to neutral blue
     fig_sens.update_traces(line_color='#007bff', fill='tozeroy')
     fig_sens.update_layout(font=dict(family="Roboto"))
     
